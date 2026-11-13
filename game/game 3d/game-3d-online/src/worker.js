@@ -243,6 +243,8 @@ export class GameRoom extends DurableObject {
       // --- Di chuyển ngang ---
       let { dx, dz } = p;
       const len = Math.hypot(dx, dz);
+      // Trạng thái di chuyển để client chọn hoạt ảnh: 0 đứng yên, 1 đi, 2 chạy
+      p.move = len < 0.01 ? 0 : p.run ? 2 : 1;
       if (len < 0.01) continue;
 
       // Chuẩn hóa để đi chéo không nhanh hơn đi thẳng
@@ -272,6 +274,7 @@ export class GameRoom extends DurableObject {
         y: Math.round(p.y * 100) / 100,
         z: Math.round(p.z * 100) / 100,
         rot: Math.round(p.rot * 100) / 100,
+        m: p.move || 0,
       })),
     });
   }

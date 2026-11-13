@@ -59,7 +59,12 @@
 
   <!-- Three.js tải từ CDN (cần có mạng internet) -->
   <script type="importmap">
-    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
   </script>
 </head>
 <body>
@@ -88,6 +93,31 @@
 
   <script type="module">
     import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+    // ============================================================
+    //  0. MÔ HÌNH NHÂN VẬT
+    //  Robot "RobotExpressive" của Tomás Laulhé (giấy phép CC0, dùng tự do),
+    //  có sẵn các hoạt ảnh: đứng yên, đi, chạy, nhảy.
+    //  Muốn đổi nhân vật: thay MODEL_URL bằng file .glb khác (ví dụ đặt file
+    //  vào public/ rồi ghi '/ten-file.glb') và sửa tên hoạt ảnh trong ANIMS.
+    // ============================================================
+    const MODEL_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/RobotExpressive/RobotExpressive.glb';
+    const MODEL_HEIGHT = 2.2;       // chiều cao nhân vật trong game
+    const TINT_MATERIAL = 'Main';   // phần thân robot sẽ được tô màu riêng của từng người chơi
+    const ANIMS = { idle: 'Idle', walk: 'Walking', run: 'Running', jump: 'Jump' };
+
+    // Tải mô hình MỘT lần, mỗi người chơi dùng một bản sao.
+    // Nếu tải lỗi (mất mạng...), game vẫn chạy với nhân vật khối hộp.
+    const modelReady = new GLTFLoader().loadAsync(MODEL_URL).then((gltf) => {
+      gltf.scene.updateMatrixWorld(true); // phải cập nhật trước thì mới đo đúng kích thước
+      const box = new THREE.Box3().setFromObject(gltf.scene);
+      return { scene: gltf.scene, clips: gltf.animations, scale: MODEL_HEIGHT / (box.max.y - box.min.y) };
+    }).catch((err) => {
+      console.warn('Không tải được mô hình nhân vật, dùng khối hộp thay thế.', err);
+      return null;
+    });
 
     // ============================================================
     //  1. DỰNG CẢNH 3D
@@ -233,16 +263,15 @@
       p.bubble = null;
     }
 
-    // Tạo nhân vật: thân hộp + đầu + "mũi" để thấy hướng quay mặt.
-    // Sau này thay phần này bằng mô hình 3D thật (file .glb).
-    function makePlayerMesh(info) {
-      const group = new THREE.Group();
-      const mat = new THREE.MeshStandardMaterial({ color: info.color });
+    // Nhân vật khối hộp: hiện tạm trong lúc mô hình 3D đang tải (hoặc khi tải lỗi)
+    function makeBlockyBody(color) {
+      const blocky = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({ color });
 
       const body = new THREE.Mesh(new THREE.BoxGeometry(1, 1.2, 0.7), mat);
       body.position.y = 0.6;
       body.castShadow = true;
-      group.add(body);
+      blocky.add(body);
 
       const head = new THREE.Mesh(
         new THREE.BoxGeometry(0.7, 0.7, 0.7),
@@ -250,17 +279,67 @@
       );
       head.position.y = 1.55;
       head.castShadow = true;
-      group.add(head);
+      blocky.add(head);
 
       const nose = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.3), mat);
       nose.position.set(0, 1.55, 0.45); // +z là phía trước mặt
-      group.add(nose);
+      blocky.add(nose);
+      return blocky;
+    }
 
+    // Tạo nhân vật: nhãn tên + thân. Thân ban đầu là khối hộp,
+    // khi mô hình 3D tải xong thì thay bằng bản sao của mô hình.
+    function makePlayerMesh(info) {
+      const group = new THREE.Group();
+      const blocky = makeBlockyBody(info.color);
+      group.add(blocky);
       group.add(makeNameLabel(info.name));
       group.position.set(info.x, info.y || 0, info.z);
       group.rotation.y = info.rot;
       scene.add(group);
+
+      modelReady.then((m) => {
+        if (!m || !group.parent) return; // tải lỗi, hoặc người chơi đã thoát
+
+        // SkeletonUtils.clone sao chép cả bộ xương, để mỗi nhân vật cử động riêng
+        const model = SkeletonUtils.clone(m.scene);
+        model.scale.setScalar(m.scale);
+        model.traverse((o) => {
+          if (!o.isMesh) return;
+          o.castShadow = true;
+          if (o.material.name === TINT_MATERIAL) {
+            o.material = o.material.clone();
+            o.material.color.set(info.color); // mỗi người một màu
+          }
+        });
+        group.remove(blocky);
+        group.add(model);
+
+        // Bộ phát hoạt ảnh riêng cho nhân vật này
+        const mixer = new THREE.AnimationMixer(model);
+        const actions = {};
+        for (const key in ANIMS) {
+          const clip = THREE.AnimationClip.findByName(m.clips, ANIMS[key]);
+          if (clip) actions[key] = mixer.clipAction(clip);
+        }
+        if (actions.jump) {
+          actions.jump.setLoop(THREE.LoopOnce); // nhảy chỉ diễn một lần rồi giữ dáng cuối
+          actions.jump.clampWhenFinished = true;
+        }
+        if (actions.idle) actions.idle.play();
+        group.userData.anim = { mixer, actions, current: 'idle' };
+      });
+
       return group;
+    }
+
+    // Chuyển mượt sang hoạt ảnh khác (đứng yên / đi / chạy / nhảy)
+    function setAnim(anim, name) {
+      if (anim.current === name || !anim.actions[name]) return;
+      const prev = anim.actions[anim.current];
+      if (prev) prev.fadeOut(0.15);
+      anim.actions[name].reset().fadeIn(0.15).play();
+      anim.current = name;
     }
 
     // ============================================================
@@ -334,6 +413,7 @@
             p.targetY = s.y;
             p.targetZ = s.z;
             p.targetRot = s.rot;
+            p.move = s.m;
           }
         } else if (msg.type === 'chat') {
           // Chỉ nhận được tin này khi mình đang đứng gần người nói
@@ -472,6 +552,16 @@
         p.mesh.position.x += (p.targetX - p.mesh.position.x) * smooth;
         p.mesh.position.z += (p.targetZ - p.mesh.position.z) * smooth;
         p.mesh.position.y += (p.targetY - p.mesh.position.y) * smooth;
+
+        // Chọn hoạt ảnh theo trạng thái server báo về (m: 0 đứng yên, 1 đi, 2 chạy)
+        const anim = p.mesh.userData.anim;
+        if (anim) {
+          if (p.targetY > 0.05) setAnim(anim, 'jump');
+          else if (p.move === 2) setAnim(anim, 'run');
+          else if (p.move === 1) setAnim(anim, 'walk');
+          else setAnim(anim, 'idle');
+          anim.mixer.update(dt);
+        }
 
         // Quay theo đường ngắn nhất
         let diff = p.targetRot - p.mesh.rotation.y;
