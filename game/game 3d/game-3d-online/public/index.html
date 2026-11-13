@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game 3D Online - Bản thử</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, "Segoe UI", sans-serif; background: #10141c; }
+    canvas { display: block; }
+
+    #login {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(10, 14, 22, 0.88); z-index: 10;
+    }
+    #login form {
+      background: #1b2230; padding: 28px 32px; border-radius: 14px; width: 320px;
+      color: #e8edf5; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    #login h1 { margin: 0 0 6px; font-size: 22px; }
+    #login p { margin: 0 0 18px; color: #93a0b5; font-size: 14px; }
+    #login input {
+      width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid #36425a;
+      background: #121823; color: #fff; font-size: 16px; outline: none;
+    }
+    #login input:focus { border-color: #4f8cff; }
+    #login button {
+      width: 100%; margin-top: 12px; padding: 11px; border: 0; border-radius: 8px;
+      background: #4f8cff; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer;
+    }
+    #login button:hover { background: #3d7af0; }
+    #error { color: #ff7b7b; font-size: 13px; min-height: 18px; margin-top: 10px; }
+
+    #hud {
+      position: fixed; top: 12px; left: 12px; padding: 10px 14px; border-radius: 10px;
+      background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 14px; line-height: 1.6;
+      pointer-events: none; display: none;
+    }
+    #hud b { color: #8fd3ff; }
+
+    #chat { position: fixed; left: 12px; bottom: 12px; width: 340px; display: none; }
+    #chatLog {
+      max-height: 170px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+      color: #fff; font-size: 14px; line-height: 1.5; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      pointer-events: none; word-break: break-word;
+    }
+    #chatLog .who { color: #ffe08a; font-weight: 600; }
+    #chatInput {
+      display: none; width: 100%; margin-top: 6px; padding: 9px 11px; border-radius: 8px;
+      border: 1px solid #4f8cff; background: rgba(10, 14, 22, 0.85); color: #fff; font-size: 15px; outline: none;
+    }
+    #hint {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 8px 16px;
+      border-radius: 20px; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 14px;
+      pointer-events: none; display: none; white-space: nowrap;
+    }
+    #hint b { color: #ffe08a; }
+  </style>
+
+  <!-- Three.js tải từ CDN (cần có mạng internet) -->
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="login">
+    <form id="loginForm">
+      <h1>Game 3D Online</h1>
+      <p>Nhập tên để vào bản đồ cùng mọi người.</p>
+      <input id="nameInput" maxlength="16" placeholder="Tên của bạn" autocomplete="off" autofocus />
+      <button type="submit">Vào chơi</button>
+      <div id="error"></div>
+    </form>
+  </div>
+
+  <div id="hud">
+    Đang online: <b id="count">0</b><br />
+    Di chuyển: <b>W A S D</b> hoặc phím mũi tên<br />
+    Chạy: giữ <b>Shift</b> &nbsp;·&nbsp; Nhảy: <b>Space</b><br />
+    Nói chuyện: <b>Enter</b> (chỉ người đứng gần mới thấy)
+  </div>
+
+  <div id="chat">
+    <div id="chatLog"></div>
+    <input id="chatInput" maxlength="100" placeholder="Nhập tin nhắn, Enter để gửi, Esc để hủy" autocomplete="off" />
+  </div>
+  <div id="hint"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ============================================================
+    //  1. DỰNG CẢNH 3D
+    // ============================================================
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87b8e8);
+    scene.fog = new THREE.Fog(0x87b8e8, 50, 120);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 300);
+    const CAMERA_OFFSET = new THREE.Vector3(0, 14, 14); // camera ở phía sau, trên cao
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // Ánh sáng
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x4a6b3a, 1.1));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    sun.position.set(30, 50, 20);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -60;
+    sun.shadow.camera.right = 60;
+    sun.shadow.camera.top = 60;
+    sun.shadow.camera.bottom = -60;
+    scene.add(sun);
+
+    // Dựng bản đồ theo dữ liệu server gửi về
+    function buildMap(map) {
+      const size = map.half * 2;
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size),
+        new THREE.MeshStandardMaterial({ color: 0x5fa55a })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const grid = new THREE.GridHelper(size, size / 2, 0x3d7a3a, 0x4f9150);
+      grid.position.y = 0.01;
+      scene.add(grid);
+
+      const wallMat = new THREE.MeshStandardMaterial({ color: 0xb9a48a });
+      for (const o of map.obstacles) {
+        const box = new THREE.Mesh(new THREE.BoxGeometry(o.w, o.h, o.d), wallMat);
+        box.position.set(o.x, o.h / 2, o.z);
+        box.castShadow = true;
+        box.receiveShadow = true;
+        scene.add(box);
+      }
+    }
+
+    // Nhãn tên nổi trên đầu nhân vật
+    function makeNameLabel(name) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.strokeText(name, 128, 32);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(name, 128, 32);
+
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false })
+      );
+      sprite.scale.set(4, 1, 1);
+      sprite.position.y = 2.6;
+      return sprite;
+    }
+
+    // Bong bóng lời nói hiện trên đầu nhân vật
+    function makeBubble(text) {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const FONT = '30px system-ui, sans-serif';
+      const MAX_WIDTH = 460;
+
+      // Tự xuống dòng khi câu quá dài
+      ctx.font = FONT;
+      const lines = [];
+      let line = '';
+      for (const word of text.split(' ')) {
+        const test = line ? line + ' ' + word : word;
+        if (ctx.measureText(test).width > MAX_WIDTH && line) {
+          lines.push(line);
+          line = word;
+        } else {
+          line = test;
+        }
+      }
+      lines.push(line);
+
+      canvas.width = 512;
+      canvas.height = lines.length * 40 + 36;
+      ctx.font = FONT; // đổi kích thước canvas làm mất cài đặt font nên phải đặt lại
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath();
+      ctx.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 22);
+      ctx.fill();
+      ctx.fillStyle = '#1b2230';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      lines.forEach((l, i) => ctx.fillText(l, 256, 18 + 20 + i * 40, 480));
+
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false })
+      );
+      const width = 5;
+      const height = (width * canvas.height) / canvas.width;
+      sprite.scale.set(width, height, 1);
+      sprite.position.y = 3.2 + height / 2;
+      sprite.renderOrder = 10;
+      return sprite;
+    }
+
+    function showBubble(p, text) {
+      clearBubble(p);
+      p.bubble = makeBubble(text);
+      p.mesh.add(p.bubble);
+      p.bubbleTimer = setTimeout(() => clearBubble(p), 5000); // tự biến mất sau 5 giây
+    }
+
+    function clearBubble(p) {
+      if (!p.bubble) return;
+      clearTimeout(p.bubbleTimer);
+      p.mesh.remove(p.bubble);
+      p.bubble.material.map.dispose();
+      p.bubble.material.dispose();
+      p.bubble = null;
+    }
+
+    // Tạo nhân vật: thân hộp + đầu + "mũi" để thấy hướng quay mặt.
+    // Sau này thay phần này bằng mô hình 3D thật (file .glb).
+    function makePlayerMesh(info) {
+      const group = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({ color: info.color });
+
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1, 1.2, 0.7), mat);
+      body.position.y = 0.6;
+      body.castShadow = true;
+      group.add(body);
+
+      const head = new THREE.Mesh(
+        new THREE.BoxGeometry(0.7, 0.7, 0.7),
+        new THREE.MeshStandardMaterial({ color: 0xffd9b3 })
+      );
+      head.position.y = 1.55;
+      head.castShadow = true;
+      group.add(head);
+
+      const nose = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.3), mat);
+      nose.position.set(0, 1.55, 0.45); // +z là phía trước mặt
+      group.add(nose);
+
+      group.add(makeNameLabel(info.name));
+      group.position.set(info.x, info.y || 0, info.z);
+      group.rotation.y = info.rot;
+      scene.add(group);
+      return group;
+    }
+
+    // ============================================================
+    //  2. KẾT NỐI SERVER
+    // ============================================================
+    const players = new Map(); // id -> { name, mesh, targetX, targetY, targetZ, targetRot, bubble }
+    let chatRadius = 6;
+    let myId = null;
+    let socket = null;
+
+    const loginEl = document.getElementById('login');
+    const errorEl = document.getElementById('error');
+    const hudEl = document.getElementById('hud');
+    const countEl = document.getElementById('count');
+    const chatEl = document.getElementById('chat');
+    const chatLogEl = document.getElementById('chatLog');
+    const chatInput = document.getElementById('chatInput');
+    const hintEl = document.getElementById('hint');
+
+    function addPlayer(info) {
+      if (players.has(info.id)) return;
+      players.set(info.id, {
+        name: info.name,
+        mesh: makePlayerMesh(info),
+        bubble: null,
+        targetX: info.x,
+        targetY: info.y || 0,
+        targetZ: info.z,
+        targetRot: info.rot,
+      });
+      countEl.textContent = players.size;
+    }
+
+    function removePlayer(id) {
+      const p = players.get(id);
+      if (!p) return;
+      clearBubble(p);
+      scene.remove(p.mesh);
+      players.delete(id);
+      countEl.textContent = players.size;
+    }
+
+    function connect(name) {
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      socket = new WebSocket(`${protocol}://${location.host}/ws`);
+
+      socket.onopen = () => socket.send(JSON.stringify({ type: 'join', name }));
+
+      socket.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'init') {
+          // Server chấp nhận: dựng bản đồ và hiện mọi người đang online
+          myId = msg.id;
+          chatRadius = msg.map.chatRadius || chatRadius;
+          buildMap(msg.map);
+          msg.players.forEach(addPlayer);
+          loginEl.style.display = 'none';
+          hudEl.style.display = 'block';
+          chatEl.style.display = 'block';
+        } else if (msg.type === 'joined') {
+          addPlayer(msg.player);
+        } else if (msg.type === 'left') {
+          removePlayer(msg.id);
+        } else if (msg.type === 'state') {
+          // Vị trí mới từ server: lưu làm "đích đến", nhân vật sẽ trượt mượt tới đó
+          for (const s of msg.players) {
+            const p = players.get(s.id);
+            if (!p) continue;
+            p.targetX = s.x;
+            p.targetY = s.y;
+            p.targetZ = s.z;
+            p.targetRot = s.rot;
+          }
+        } else if (msg.type === 'chat') {
+          // Chỉ nhận được tin này khi mình đang đứng gần người nói
+          const p = players.get(msg.id);
+          if (p) {
+            showBubble(p, msg.text);
+            addChatLine(p.name, msg.text);
+          }
+        } else if (msg.type === 'error') {
+          errorEl.textContent = msg.message;
+        }
+      };
+
+      socket.onclose = () => {
+        if (myId !== null) {
+          alertDisconnected();
+        } else if (!errorEl.textContent) {
+          errorEl.textContent = 'Không kết nối được server.';
+        }
+      };
+    }
+
+    function addChatLine(name, text) {
+      const row = document.createElement('div');
+      const who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = name + ': ';
+      row.append(who, text); // dùng textContent nên không ai chèn được mã HTML
+      chatLogEl.appendChild(row);
+      while (chatLogEl.children.length > 8) chatLogEl.firstChild.remove();
+      setTimeout(() => row.remove(), 20000);
+    }
+
+    function alertDisconnected() {
+      loginEl.style.display = 'flex';
+      loginEl.querySelector('form').innerHTML =
+        '<h1>Mất kết nối</h1><p>Server đã ngắt. Hãy tải lại trang để vào lại.</p>' +
+        '<button type="button" onclick="location.reload()">Tải lại</button>';
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (socket) return;
+      errorEl.textContent = '';
+      connect(document.getElementById('nameInput').value);
+    });
+
+    // ============================================================
+    //  3. ĐIỀU KHIỂN: chỉ gửi HƯỚNG muốn đi, server tính vị trí
+    // ============================================================
+    const keys = { up: false, down: false, left: false, right: false, run: false, jump: false };
+    const KEY_MAP = {
+      KeyW: 'up', ArrowUp: 'up',
+      KeyS: 'down', ArrowDown: 'down',
+      KeyA: 'left', ArrowLeft: 'left',
+      KeyD: 'right', ArrowRight: 'right',
+      ShiftLeft: 'run', ShiftRight: 'run',
+      Space: 'jump',
+    };
+    let lastSent = '';
+
+    function sendInput() {
+      if (!socket || socket.readyState !== WebSocket.OPEN || myId === null) return;
+      const dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+      const dz = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+      const text = JSON.stringify({ type: 'input', dx, dz, run: keys.run, jump: keys.jump });
+      if (text === lastSent) return; // chỉ gửi khi có thay đổi
+      lastSent = text;
+      socket.send(text);
+    }
+
+    function stopAllKeys() {
+      for (const k in keys) keys[k] = false;
+      sendInput();
+    }
+
+    // --- Chat: Enter để mở ô nhập, Enter lần nữa để gửi, Esc để hủy ---
+    function closeChat() {
+      chatInput.value = '';
+      chatInput.style.display = 'none';
+      chatInput.blur();
+    }
+
+    chatInput.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // đang gõ chữ thì không điều khiển nhân vật
+      if (e.key === 'Enter') {
+        const text = chatInput.value.trim();
+        if (text && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'chat', text }));
+        }
+        closeChat();
+      } else if (e.key === 'Escape') {
+        closeChat();
+      }
+    });
+    chatInput.addEventListener('keyup', (e) => e.stopPropagation());
+
+    addEventListener('keydown', (e) => {
+      if (myId === null) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        stopAllKeys();
+        chatInput.style.display = 'block';
+        chatInput.focus();
+        return;
+      }
+      const k = KEY_MAP[e.code];
+      if (!k) return;
+      e.preventDefault();
+      keys[k] = true;
+      sendInput();
+    });
+    addEventListener('keyup', (e) => {
+      const k = KEY_MAP[e.code];
+      if (!k) return;
+      keys[k] = false;
+      sendInput();
+    });
+    // Chuyển sang tab khác thì dừng lại, tránh nhân vật chạy mãi
+    addEventListener('blur', stopAllKeys);
+
+    // ============================================================
+    //  4. VÒNG LẶP VẼ
+    // ============================================================
+    const clock = new THREE.Clock();
+    let lastHint = '';
+    camera.position.copy(CAMERA_OFFSET);
+    camera.lookAt(0, 0, 0);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.1);
+      const smooth = 1 - Math.exp(-15 * dt); // hệ số làm mượt
+
+      for (const p of players.values()) {
+        p.mesh.position.x += (p.targetX - p.mesh.position.x) * smooth;
+        p.mesh.position.z += (p.targetZ - p.mesh.position.z) * smooth;
+        p.mesh.position.y += (p.targetY - p.mesh.position.y) * smooth;
+
+        // Quay theo đường ngắn nhất
+        let diff = p.targetRot - p.mesh.rotation.y;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        p.mesh.rotation.y += diff * smooth;
+      }
+
+      // Camera bám theo nhân vật của mình
+      const me = players.get(myId);
+      if (me) {
+        // Camera chỉ bám theo x, z để màn hình không nảy lên khi nhảy
+        const mx = me.mesh.position.x;
+        const mz = me.mesh.position.z;
+        camera.position.set(mx + CAMERA_OFFSET.x, CAMERA_OFFSET.y, mz + CAMERA_OFFSET.z);
+        camera.lookAt(mx, 1, mz);
+
+        // Gợi ý khi có người đứng đủ gần để nói chuyện
+        let nearest = null;
+        let nearestDist = chatRadius;
+        for (const [id, p] of players) {
+          if (id === myId) continue;
+          const d = Math.hypot(p.mesh.position.x - mx, p.mesh.position.z - mz);
+          if (d <= nearestDist) {
+            nearestDist = d;
+            nearest = p;
+          }
+        }
+        const hint = nearest ? nearest.name : '';
+        if (hint !== lastHint) {
+          lastHint = hint;
+          hintEl.style.display = hint ? 'block' : 'none';
+          hintEl.innerHTML = '';
+          if (hint) {
+            const b = document.createElement('b');
+            b.textContent = hint;
+            hintEl.append('Nhấn Enter để nói chuyện với ', b);
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

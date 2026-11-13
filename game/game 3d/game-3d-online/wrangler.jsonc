@@ -1,0 +1,15 @@
+{
+  // Tên này quyết định địa chỉ: https://game-3d-online.<tài-khoản>.workers.dev
+  "name": "game-3d-online",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-06-01",
+
+  // Cloudflare tự phát các file trong public/ (trang web của game)
+  "assets": { "directory": "./public" },
+
+  // Phòng game: nơi giữ trạng thái và chạy vòng lặp
+  "durable_objects": {
+    "bindings": [{ "name": "GAME_ROOM", "class_name": "GameRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GameRoom"] }]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "game-3d-online",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Bản thử game 3D online nhiều người chơi, server chạy trên Cloudflare",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.161.0"
+  }
+}
