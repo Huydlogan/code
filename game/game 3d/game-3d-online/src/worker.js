@@ -54,6 +54,15 @@ const OBSTACLES = [
 
 const COLORS = [0xe74c3c, 0x3498db, 0x2ecc71, 0xf1c40f, 0x9b59b6, 0xe67e22, 0x1abc9c, 0xff6fb5];
 
+// ---------- Cập nhật phiên bản ----------
+const VERSION_HEADER = 'X-Game-Version';
+const CLOSE_UPDATED = 4001; // mã đóng kết nối báo cho client: "server vừa lên bản mới"
+
+// Mã của bản code đang chạy; Cloudflare cấp mã mới sau mỗi lần deploy
+function currentVersion(env) {
+  return (env.CF_VERSION_METADATA && env.CF_VERSION_METADATA.id) || '';
+}
+
 // ---------- Hàm tiện ích ----------
 
 // Kiểm tra hình tròn (nhân vật) có chạm hình chữ nhật (vật cản) không
@@ -138,6 +147,23 @@ export class GameRoom extends DurableObject {
   async fetch(request) {
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('Cần kết nối WebSocket', { status: 426 });
+    }
+
+    // Có bản code mới vừa được deploy: ngắt mọi người rồi khởi động lại phòng,
+    // để phòng chạy bản mới ngay thay vì chờ tới khi không còn ai chơi.
+    const wanted = request.headers.get(VERSION_HEADER) || '';
+    const mine = currentVersion(this.env);
+    if (wanted && mine && wanted !== mine) {
+      this.stopLoop();
+      for (const p of this.players.values()) {
+        try {
+          p.ws.close(CLOSE_UPDATED, 'updated'); // client thấy mã này sẽ tự tải lại trang
+        } catch {
+          // đã đóng rồi
+        }
+      }
+      this.players.clear();
+      this.ctx.abort('Có bản mới, khởi động lại phòng game');
     }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -450,8 +476,19 @@ export default {
     if (url.pathname === '/ws') {
       // Mọi người đều vào cùng một phòng tên "world".
       // Sau này muốn nhiều server: đổi tên phòng theo đường dẫn, ví dụ /ws/phong-2
-      const room = env.GAME_ROOM.get(env.GAME_ROOM.idFromName('world'));
-      return room.fetch(request);
+      const getRoom = () => env.GAME_ROOM.get(env.GAME_ROOM.idFromName('world'));
+
+      // Worker (phần cửa vào) luôn chạy bản code mới nhất ngay sau khi deploy, còn phòng game
+      // đang có người chơi thì vẫn giữ bản cũ. Nên Worker báo cho phòng biết mã phiên bản
+      // hiện tại; phòng thấy khác bản của mình thì tự khởi động lại (xem GameRoom.fetch).
+      const headers = new Headers(request.headers);
+      headers.set(VERSION_HEADER, currentVersion(env));
+      try {
+        return await getRoom().fetch(new Request(request, { headers }));
+      } catch {
+        // Phòng vừa tự khởi động lại để lên bản mới: gọi lại, lần này là phòng mới
+        return await getRoom().fetch(new Request(request, { headers }));
+      }
     }
     return new Response('Not found', { status: 404 });
   },

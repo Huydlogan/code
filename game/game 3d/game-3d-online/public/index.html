@@ -522,8 +522,16 @@
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (myId !== null) {
+          // Server vừa lên bản mới (mã 4001), hoặc bị ngắt đột ngột (1006) trong lúc đó:
+          // tự tải lại trang để lấy bản mới. Chỉ tự tải 1 lần trong 20 giây, tránh tải lại liên tục
+          // khi server thật sự gặp sự cố.
+          const lastReload = Number(sessionStorage.getItem('autoReloadAt') || 0);
+          if ((event.code === 4001 || event.code === 1006) && Date.now() - lastReload > 20000) {
+            sessionStorage.setItem('autoReloadAt', String(Date.now()));
+            return location.reload();
+          }
           alertDisconnected();
         } else if (!errorEl.textContent) {
           errorEl.textContent = 'Không kết nối được server.';
@@ -553,8 +561,11 @@
       e.preventDefault();
       if (socket) return;
       errorEl.textContent = '';
-      connect(document.getElementById('nameInput').value);
+      const name = document.getElementById('nameInput').value;
+      sessionStorage.setItem('playerName', name); // nhớ tên để điền sẵn sau khi trang tự tải lại
+      connect(name);
     });
+    document.getElementById('nameInput').value = sessionStorage.getItem('playerName') || '';
 
     // ============================================================
     //  3. ĐIỀU KHIỂN: chỉ gửi HƯỚNG muốn đi, server tính vị trí

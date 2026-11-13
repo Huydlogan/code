@@ -7,6 +7,9 @@
   // Cloudflare tự phát các file trong public/ (trang web của game)
   "assets": { "directory": "./public" },
 
+  // Mã phiên bản của lần deploy hiện tại, để phòng game biết khi nào có bản mới
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+
   // Phòng game: nơi giữ trạng thái và chạy vòng lặp
   "durable_objects": {
     "bindings": [{ "name": "GAME_ROOM", "class_name": "GameRoom" }]
