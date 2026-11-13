@@ -20,7 +20,23 @@ const CHAT_COOLDOWN_MS = 500; // mỗi người chỉ được gửi 1 câu / 0.
 const EMOTE_COOLDOWN_MS = 500; // mỗi người chỉ được làm 1 cử chỉ / 0.5 giây
 // Các cử chỉ được phép (phải khớp với danh sách EMOTES trong public/index.html)
 const EMOTES = ['dance', 'hello', 'bye', 'angry', 'sad', 'bored', 'laugh', 'cry'];
-const PLAYER_RADIUS = 0.6;  // bán kính va chạm của nhân vật
+
+// ---------- Chiến đấu ----------
+// Trạng thái hành động của nhân vật (gửi cho client trong trường "a")
+const ACT = { NONE: 0, CHARGE: 1, DASH: 2, STAGGER: 3, DOWN: 4, GETUP: 5 };
+const PUNCH_RANGE = 2.4;      // tầm với của cú đấm
+const PUNCH_COMBO_MS = 500;   // bấm cú thứ hai trong khoảng này thì thành combo 2 cú
+const PUNCH_MIN_GAP_MS = 120; // khoảng cách ngắn nhất giữa 2 cú của combo
+const CHARGE_MAX_MS = 1500;   // gồng lâu hơn mức này cũng không mạnh thêm
+const DASH_MIN = 3;           // quãng lướt khi gồng rất ngắn
+const DASH_MAX = 12;          // quãng lướt khi gồng hết mức
+const DASH_SPEED = 30;        // tốc độ lướt (đơn vị / giây)
+const DASH_HIT_RADIUS = 1.5;  // lướt sượt qua ai trong khoảng này thì người đó bị hất ngã
+const DOWN_MS = 1500;         // thời gian nằm dưới đất
+const GETUP_MS = 700;         // thời gian đứng dậy
+const KNOCK_FRICTION = 8;     // độ hãm khi bị đẩy lùi (lớn hơn thì dừng nhanh hơn)
+
+const PLAYER_RADIUS = 0.6; // bán kính va chạm của nhân vật
 const MAX_PLAYERS = 50;
 const MAX_MESSAGE_LENGTH = 1024; // tin nhắn dài hơn mức này bị bỏ qua
 
@@ -63,6 +79,35 @@ function randomSpawn() {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+// Dịch nhân vật đi một đoạn (mx, mz), có chặn tường và mép bản đồ.
+// Đi từng trục riêng để nhân vật trượt dọc theo tường. Trả về true nếu có nhúc nhích.
+function tryMove(p, mx, mz) {
+  const limit = MAP_HALF - PLAYER_RADIUS;
+  const oldX = p.x;
+  const oldZ = p.z;
+  const newX = clamp(p.x + mx, -limit, limit);
+  if (!hitsObstacle(newX, p.z)) p.x = newX;
+  const newZ = clamp(p.z + mz, -limit, limit);
+  if (!hitsObstacle(p.x, newZ)) p.z = newZ;
+  return Math.abs(p.x - oldX) + Math.abs(p.z - oldZ) > 1e-4;
+}
+
+// Làm choáng: lùi nhẹ theo hướng (dirX, dirZ), mất điều khiển một lúc
+function stagger(p, dirX, dirZ, speed, ms, now) {
+  p.act = ACT.STAGGER;
+  p.actUntil = now + ms;
+  p.kx = dirX * speed;
+  p.kz = dirZ * speed;
+}
+
+// Hất ngã: văng đi, nằm một lúc rồi tự đứng dậy
+function knockDown(p, dirX, dirZ, speed, now) {
+  p.act = ACT.DOWN;
+  p.actUntil = now + DOWN_MS;
+  p.kx = dirX * speed;
+  p.kz = dirZ * speed;
 }
 
 // Thông tin công khai của một người chơi (gửi cho client)
@@ -146,6 +191,16 @@ export class GameRoom extends DurableObject {
           jump: false,   // đang giữ Space
           lastChat: 0,
           lastEmote: 0,
+          act: ACT.NONE, // đang gồng / lướt / choáng / nằm / đứng dậy
+          actUntil: 0,   // thời điểm hết trạng thái choáng, nằm, đứng dậy
+          kx: 0,         // vận tốc bị đẩy lùi
+          kz: 0,
+          lastPunch: 0,
+          punchCount: 0, // 1 = cú đầu, 2 = cú thứ hai của combo
+          chargeStart: 0,
+          dashLeft: 0,   // quãng lướt còn lại
+          dashPower: 0,  // 0..1, gồng càng lâu càng lớn
+          dashHit: null, // những người đã trúng trong lần lướt này
           ws,
         };
         this.players.set(id, player);
@@ -176,10 +231,61 @@ export class GameRoom extends DurableObject {
         return;
       }
 
+      // --- Đấm về phía trước ---
+      // Bấm một lần: 1 cú. Bấm tiếp ngay sau đó: cú thứ hai của combo.
+      if (msg.type === 'punch' && player) {
+        if (player.act !== ACT.NONE) return;
+        const now = Date.now();
+        const gap = now - player.lastPunch;
+        if (gap > PUNCH_COMBO_MS) player.punchCount = 1;
+        else if (player.punchCount === 1 && gap >= PUNCH_MIN_GAP_MS) player.punchCount = 2;
+        else return; // đã đấm đủ 2 cú, phải nghỉ một nhịp
+        player.lastPunch = now;
+        this.broadcast({ type: 'punch', id: player.id, n: player.punchCount });
+
+        // Ai đứng trong tầm và ở phía trước mặt thì trúng đòn
+        const dirX = Math.sin(player.rot);
+        const dirZ = Math.cos(player.rot);
+        for (const o of this.players.values()) {
+          if (o === player || o.act === ACT.DOWN || o.act === ACT.GETUP) continue;
+          const ox = o.x - player.x;
+          const oz = o.z - player.z;
+          const dist = Math.hypot(ox, oz);
+          if (dist > PUNCH_RANGE || Math.abs(o.y - player.y) > 1.5) continue;
+          if (dist > 0.01 && (ox * dirX + oz * dirZ) / dist < 0.4) continue; // không ở phía trước
+          // Đang choáng mà dính thêm cú nữa thì ngã; còn không thì choáng và lùi nhẹ
+          if (o.act === ACT.STAGGER) knockDown(o, dirX, dirZ, 8, now);
+          else stagger(o, dirX, dirZ, player.punchCount === 2 ? 7 : 5, player.punchCount === 2 ? 900 : 650, now);
+        }
+        return;
+      }
+
+      // --- Gồng lực (giữ chuột) rồi thả ra để lướt tới ---
+      if (msg.type === 'charge' && player) {
+        const now = Date.now();
+        if (msg.on === true) {
+          if (player.act !== ACT.NONE) return;
+          player.act = ACT.CHARGE;
+          player.chargeStart = now;
+        } else if (player.act === ACT.CHARGE) {
+          if (msg.cancel === true) {
+            player.act = ACT.NONE;
+            return;
+          }
+          // Server tự đo thời gian gồng, không tin con số client gửi
+          player.dashPower = clamp((now - player.chargeStart) / CHARGE_MAX_MS, 0, 1);
+          player.dashLeft = DASH_MIN + (DASH_MAX - DASH_MIN) * player.dashPower;
+          player.dashHit = new Set();
+          player.act = ACT.DASH;
+        }
+        return;
+      }
+
       // --- Người chơi làm một cử chỉ (vẫy tay, nhảy múa...) ---
       // Server chỉ kiểm tra tên hợp lệ rồi báo cho mọi người; client lo phần diễn hoạt ảnh.
       if (msg.type === 'emote' && player) {
         const now = Date.now();
+        if (player.act !== ACT.NONE) return; // đang đánh nhau hoặc bị ngã thì không làm cử chỉ
         if (now - player.lastEmote < EMOTE_COOLDOWN_MS) return; // chống spam
         if (!EMOTES.includes(msg.name)) return;
         player.lastEmote = now;
@@ -244,8 +350,26 @@ export class GameRoom extends DurableObject {
     this.lastTick = now;
 
     for (const p of this.players.values()) {
+      // --- Hết giờ choáng / nằm / đứng dậy ---
+      if (p.act === ACT.STAGGER && now >= p.actUntil) p.act = ACT.NONE;
+      if (p.act === ACT.DOWN && now >= p.actUntil) {
+        p.act = ACT.GETUP; // nằm đủ lâu thì tự đứng dậy
+        p.actUntil = now + GETUP_MS;
+      } else if (p.act === ACT.GETUP && now >= p.actUntil) {
+        p.act = ACT.NONE;
+      }
+
+      // --- Bị đẩy lùi sau khi trúng đòn: trượt đi rồi chậm dần ---
+      if (p.kx !== 0 || p.kz !== 0) {
+        tryMove(p, p.kx * DT, p.kz * DT);
+        const slow = Math.exp(-KNOCK_FRICTION * DT);
+        p.kx *= slow;
+        p.kz *= slow;
+        if (Math.hypot(p.kx, p.kz) < 0.3) p.kx = p.kz = 0;
+      }
+
       // --- Nhảy và rơi ---
-      if (p.jump && p.y === 0) p.vy = JUMP_SPEED; // chỉ nhảy được khi đang đứng trên đất
+      if (p.jump && p.y === 0 && p.act === ACT.NONE) p.vy = JUMP_SPEED; // chỉ nhảy được khi đang đứng trên đất
       if (p.y > 0 || p.vy > 0) {
         p.vy -= GRAVITY * DT;
         p.y += p.vy * DT;
@@ -255,11 +379,32 @@ export class GameRoom extends DurableObject {
         }
       }
 
-      // --- Di chuyển ngang ---
       let { dx, dz } = p;
       const len = Math.hypot(dx, dz);
-      // Trạng thái di chuyển để client chọn hoạt ảnh: 0 đứng yên, 1 đi, 2 chạy
-      p.move = len < 0.01 ? 0 : p.run ? 2 : 1;
+      p.move = 0; // 0 đứng yên, 1 đi, 2 chạy (để client chọn hoạt ảnh)
+
+      // --- Đang lướt tới sau khi gồng lực ---
+      if (p.act === ACT.DASH) {
+        const dirX = Math.sin(p.rot);
+        const dirZ = Math.cos(p.rot);
+        const step = Math.min(DASH_SPEED * DT, p.dashLeft);
+        const moved = tryMove(p, dirX * step, dirZ * step);
+        p.dashLeft -= step;
+
+        // Ai đứng trên đường lướt thì bị hất ngã (mỗi người chỉ trúng một lần)
+        for (const o of this.players.values()) {
+          if (o === p || p.dashHit.has(o.id) || o.act === ACT.DOWN || o.act === ACT.GETUP) continue;
+          if (Math.hypot(o.x - p.x, o.z - p.z) > DASH_HIT_RADIUS || Math.abs(o.y - p.y) > 1.5) continue;
+          p.dashHit.add(o.id);
+          knockDown(o, dirX, dirZ, 9 + 11 * p.dashPower, now);
+        }
+        if (p.dashLeft <= 0 || !moved) p.act = ACT.NONE; // đi hết quãng hoặc đâm vào tường
+        continue;
+      }
+
+      // --- Đang choáng, nằm hoặc đứng dậy: không điều khiển được ---
+      if (p.act === ACT.STAGGER || p.act === ACT.DOWN || p.act === ACT.GETUP) continue;
+
       if (len < 0.01) continue;
 
       // Chuẩn hóa để đi chéo không nhanh hơn đi thẳng
@@ -267,17 +412,15 @@ export class GameRoom extends DurableObject {
         dx /= len;
         dz /= len;
       }
-
-      const speed = p.run ? RUN_SPEED : PLAYER_SPEED;
-
-      // Di chuyển từng trục riêng để nhân vật trượt dọc theo tường
-      const newX = clamp(p.x + dx * speed * DT, -MAP_HALF + PLAYER_RADIUS, MAP_HALF - PLAYER_RADIUS);
-      if (!hitsObstacle(newX, p.z)) p.x = newX;
-
-      const newZ = clamp(p.z + dz * speed * DT, -MAP_HALF + PLAYER_RADIUS, MAP_HALF - PLAYER_RADIUS);
-      if (!hitsObstacle(p.x, newZ)) p.z = newZ;
-
       p.rot = Math.atan2(dx, dz); // hướng nhân vật quay mặt
+
+      // --- Đang gồng lực: đứng yên, chỉ xoay người để ngắm hướng lướt ---
+      if (p.act === ACT.CHARGE) continue;
+
+      // --- Di chuyển bình thường ---
+      p.move = p.run ? 2 : 1;
+      const speed = p.run ? RUN_SPEED : PLAYER_SPEED;
+      tryMove(p, dx * speed * DT, dz * speed * DT);
     }
 
     // Gửi vị trí mới của mọi người cho tất cả
@@ -290,6 +433,7 @@ export class GameRoom extends DurableObject {
         z: Math.round(p.z * 100) / 100,
         rot: Math.round(p.rot * 100) / 100,
         m: p.move || 0,
+        a: p.act,
       })),
     });
   }

@@ -94,7 +94,9 @@
     Di chuyển: <b>W A S D</b> hoặc phím mũi tên<br />
     Chạy: giữ <b>Shift</b> &nbsp;·&nbsp; Nhảy: <b>Space</b><br />
     Nói chuyện: <b>Enter</b> (chỉ người đứng gần mới thấy)<br />
-    Cử chỉ: giữ <b>chuột trái</b>, kéo tới cử chỉ rồi thả
+    Đấm: <b>chuột trái</b> (bấm đúp: 2 cú liên tiếp)<br />
+    Gồng lực: giữ <b>chuột trái</b>, thả ra để lướt tới<br />
+    Cử chỉ: giữ <b>chuột phải</b> 0,5 giây, kéo tới cử chỉ rồi thả
   </div>
 
   <div id="chat">
@@ -123,6 +125,11 @@
     const ANIMS = { idle: 'Idle', walk: 'Walking', run: 'Running', jump: 'Jump', moveJump: 'WalkJump' };
     // Những hoạt ảnh chỉ diễn một lần rồi giữ dáng cuối (các hoạt ảnh khác lặp lại)
     const PLAY_ONCE = ['Jump', 'WalkJump', 'Wave', 'Sitting', 'Death'];
+
+    const PUNCH_ANIM_MS = 430;   // một cú đấm diễn trong bao lâu
+    const CHARGE_MAX_MS = 1500;  // gồng tối đa (khớp với server), để vẽ vòng gồng lực
+    const HOLD_TO_CHARGE_MS = 220; // giữ chuột trái lâu hơn mức này là gồng, ngắn hơn là đấm
+    const HOLD_TO_WHEEL_MS = 500;  // giữ chuột phải bấy lâu thì mở bảng cử chỉ
 
     // ---------- Cử chỉ ----------
     // id: tên gửi lên server (phải có trong danh sách EMOTES của server)
@@ -353,28 +360,45 @@
         // Bộ phát hoạt ảnh riêng cho nhân vật này
         const mixer = new THREE.AnimationMixer(model);
         const actions = {}; // tên hoạt ảnh -> hành động phát được
-        for (const clip of m.clips) {
-          const action = mixer.clipAction(clip);
-          if (PLAY_ONCE.includes(clip.name)) {
-            action.setLoop(THREE.LoopOnce);
-            action.clampWhenFinished = true;
-          }
-          actions[clip.name] = action;
-        }
+        for (const clip of m.clips) actions[clip.name] = mixer.clipAction(clip);
         if (actions[ANIMS.idle]) actions[ANIMS.idle].play();
-        group.userData.anim = { mixer, actions, current: ANIMS.idle, face };
+        group.userData.anim = {
+          mixer, actions, face, model,
+          baseScale: m.scale,
+          current: ANIMS.idle,                // "khóa" của hoạt ảnh đang diễn
+          currentAction: actions[ANIMS.idle],
+        };
       });
 
       return group;
     }
 
-    // Chuyển mượt sang hoạt ảnh khác. restart = true: diễn lại từ đầu dù đang diễn đúng hoạt ảnh đó
-    function setAnim(anim, name, restart) {
-      if (!anim.actions[name] || (anim.current === name && !restart)) return;
-      const prev = anim.actions[anim.current];
-      if (prev && anim.current !== name) prev.fadeOut(0.15);
-      anim.actions[name].reset().fadeIn(0.15).play();
-      anim.current = name;
+    // Chuyển mượt sang hoạt ảnh khác. Tùy chọn:
+    //   key:     tên riêng cho cách diễn này (cùng một hoạt ảnh có thể diễn nhiều kiểu,
+    //            ví dụ "ngã xuống" và "đứng dậy" đều dùng hoạt ảnh Death)
+    //   once:    diễn một lần rồi giữ dáng cuối (mặc định theo danh sách PLAY_ONCE)
+    //   speed:   tốc độ diễn; số âm là diễn ngược từ cuối về đầu
+    //   restart: diễn lại từ đầu dù đang diễn đúng hoạt ảnh đó
+    function setAnim(anim, name, opts = {}) {
+      const action = anim.actions[name];
+      if (!action) return;
+      const key = opts.key || name;
+      if (anim.current === key && !opts.restart) return;
+
+      const prev = anim.currentAction;
+      if (prev && prev !== action) prev.fadeOut(0.12);
+
+      const once = opts.once ?? PLAY_ONCE.includes(name);
+      action.reset();
+      action.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = once;
+      action.timeScale = opts.speed ?? 1;
+      if (action.timeScale < 0) action.time = action.getClip().duration;
+      if (prev !== action) action.fadeIn(0.12);
+      action.play();
+
+      anim.current = key;
+      anim.currentAction = action;
     }
 
     // Đổi nét mặt: { Angry: 1 } là giận hết mức; không truyền gì là mặt bình thường
@@ -472,6 +496,10 @@
             p.targetZ = s.z;
             p.targetRot = s.rot;
             p.move = s.m;
+            if (s.a !== p.act) {
+              p.act = s.a; // 0 thường, 1 gồng, 2 lướt, 3 choáng, 4 nằm, 5 đứng dậy
+              p.actSince = performance.now();
+            }
           }
         } else if (msg.type === 'chat') {
           // Chỉ nhận được tin này khi mình đang đứng gần người nói
@@ -479,6 +507,12 @@
           if (p) {
             showBubble(p, msg.text);
             addChatLine(p.name, msg.text);
+          }
+        } else if (msg.type === 'punch') {
+          const p = players.get(msg.id);
+          if (p) {
+            p.punchUntil = performance.now() + PUNCH_ANIM_MS;
+            p.punchRestart = true; // cú thứ hai của combo diễn lại từ đầu
           }
         } else if (msg.type === 'emote') {
           const p = players.get(msg.id);
@@ -598,7 +632,7 @@
 
     // ============================================================
     //  3b. BẢNG CỬ CHỈ HÌNH TRÒN
-    //  Giữ chuột trái: bảng hiện ra với tâm ở con trỏ. Kéo về một ngăn
+    //  Giữ chuột phải 0,5 giây: bảng hiện ra với tâm ở con trỏ. Kéo về một ngăn
     //  rồi thả để làm cử chỉ đó. Thả ở giữa (chưa kéo đủ xa) thì hủy.
     // ============================================================
     const wheelEl = document.getElementById('wheel');
@@ -648,16 +682,54 @@
       wheelEl.style.display = 'none';
     }
 
-    renderer.domElement.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || myId === null) return;
-      e.preventDefault();
-      wheelCenter = { x: e.clientX, y: e.clientY };
-      wheelEl.style.left = e.clientX + 'px';
-      wheelEl.style.top = e.clientY + 'px';
+    function openWheel(x, y) {
+      wheelCenter = { x, y };
+      wheelEl.style.left = x + 'px';
+      wheelEl.style.top = y + 'px';
       wheelEl.style.display = 'block';
+    }
+
+    function sendMsg(msg) {
+      if (socket && socket.readyState === WebSocket.OPEN && myId !== null) socket.send(JSON.stringify(msg));
+    }
+
+    // ---------- Chuột ----------
+    // Chuột trái: bấm nhanh = đấm (bấm đúp = 2 cú liên tiếp);
+    //             giữ = gồng lực, thả ra = lướt tới (giữ càng lâu lướt càng xa).
+    // Chuột phải: giữ 0,5 giây = mở bảng cử chỉ ở vị trí con trỏ, kéo tới cử chỉ rồi thả.
+    let leftDown = false;
+    let charging = false;
+    let chargeTimer = null;
+    let wheelTimer = null;
+    const mouse = { x: 0, y: 0 };
+
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (myId === null) return;
+      e.preventDefault();
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+      if (e.button === 0) {
+        leftDown = true;
+        charging = false;
+        clearTimeout(chargeTimer);
+        chargeTimer = setTimeout(() => {
+          charging = true;
+          sendMsg({ type: 'charge', on: true });
+        }, HOLD_TO_CHARGE_MS);
+      } else if (e.button === 2) {
+        clearTimeout(wheelTimer);
+        wheelTimer = setTimeout(() => openWheel(mouse.x, mouse.y), HOLD_TO_WHEEL_MS);
+      }
+    });
+
+    // Không hiện menu chuột phải của trình duyệt khi đang chơi
+    addEventListener('contextmenu', (e) => {
+      if (myId !== null) e.preventDefault();
     });
 
     addEventListener('mousemove', (e) => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
       if (!wheelCenter) return;
       const dx = e.clientX - wheelCenter.x;
       const dy = e.clientY - wheelCenter.y;
@@ -668,14 +740,33 @@
     });
 
     addEventListener('mouseup', (e) => {
-      if (e.button !== 0 || !wheelCenter) return;
-      const pick = wheelPick;
-      closeWheel();
-      if (pick >= 0 && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'emote', name: EMOTES[pick].id }));
+      if (e.button === 0 && leftDown) {
+        leftDown = false;
+        clearTimeout(chargeTimer);
+        if (charging) {
+          charging = false;
+          sendMsg({ type: 'charge', on: false }); // thả ra: lướt tới
+        } else {
+          sendMsg({ type: 'punch' });             // bấm nhanh: đấm
+        }
+      } else if (e.button === 2) {
+        clearTimeout(wheelTimer);
+        if (!wheelCenter) return; // thả trước 0,5 giây: không mở bảng
+        const pick = wheelPick;
+        closeWheel();
+        if (pick >= 0) sendMsg({ type: 'emote', name: EMOTES[pick].id });
       }
     });
-    addEventListener('blur', closeWheel);
+
+    // Chuyển sang cửa sổ khác: hủy mọi thao tác chuột đang dở
+    addEventListener('blur', () => {
+      clearTimeout(chargeTimer);
+      clearTimeout(wheelTimer);
+      if (charging) sendMsg({ type: 'charge', on: false, cancel: true });
+      charging = false;
+      leftDown = false;
+      closeWheel();
+    });
 
     // ============================================================
     //  4. VÒNG LẶP VẼ
@@ -697,22 +788,84 @@
 
         // Chọn hoạt ảnh theo trạng thái server báo về (m: 0 đứng yên, 1 đi, 2 chạy)
         const anim = p.mesh.userData.anim;
+        const now = performance.now();
+        const act = p.act || 0;
+
+        // Vòng tròn dưới chân lớn dần khi đang gồng lực
+        if (act === 1) {
+          if (!p.ring) {
+            p.ring = new THREE.Mesh(
+              new THREE.RingGeometry(0.85, 1, 40),
+              new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+            );
+            p.ring.rotation.x = -Math.PI / 2;
+            p.ring.position.y = 0.06;
+            p.mesh.add(p.ring);
+          }
+          const power = Math.min((now - p.actSince) / CHARGE_MAX_MS, 1);
+          p.ring.visible = true;
+          p.ring.scale.setScalar(0.7 + 2.3 * power);
+          p.ring.material.color.setHex(power >= 1 ? 0xff5a3c : 0xffd24a); // đỏ khi gồng hết mức
+        } else if (p.ring) {
+          p.ring.visible = false;
+        }
+
         if (anim) {
           const airborne = p.targetY > 0.05;
           const moving = p.move === 1 || p.move === 2;
-          // Di chuyển, nhảy hoặc hết giờ thì dừng cử chỉ
-          if (p.emote && (airborne || moving || performance.now() > p.emote.until)) stopEmote(p);
+          const punching = now < (p.punchUntil || 0);
+          // Đánh nhau, di chuyển, nhảy hoặc hết giờ thì dừng cử chỉ
+          if (p.emote && (act !== 0 || punching || airborne || moving || now > p.emote.until)) stopEmote(p);
 
-          if (p.emote) {
+          let lean = 0;    // ngả người: dương là chúi về trước, âm là ngả ra sau
+          let squash = 1;  // nén người thấp xuống khi gồng
+          let face = '';   // nét mặt: '', 'Angry', 'Surprised', 'Sad'
+
+          if (act === 4) {            // bị hất ngã: đổ xuống rồi nằm
+            setAnim(anim, 'Death', { key: 'down', once: true, speed: 1.6 });
+            face = 'Sad';
+          } else if (act === 5) {     // đứng dậy: diễn ngược hoạt ảnh ngã
+            setAnim(anim, 'Death', { key: 'getup', once: true, speed: -1.5 });
+          } else if (act === 3) {     // choáng: lắc đầu, ngả ra sau
+            setAnim(anim, 'No', { key: 'stagger', speed: 2 });
+            lean = -0.3;
+            face = 'Surprised';
+          } else if (act === 2) {     // lướt tới: đấm liên tục, chúi về trước
+            setAnim(anim, 'Punch', { key: 'dash', speed: 2.2 });
+            lean = 0.45;
+            face = 'Angry';
+          } else if (act === 1) {     // gồng lực: nén người xuống, rung nhẹ
+            setAnim(anim, ANIMS.idle, { key: 'charge' });
+            squash = 0.82;
+            lean = -0.15;
+            face = 'Angry';
+          } else if (punching) {      // đấm thường
+            setAnim(anim, 'Punch', { key: 'punch', once: true, speed: 1.9, restart: p.punchRestart });
+            p.punchRestart = false;
+            face = 'Angry';
+          } else if (p.emote) {
             if (!p.emote.started) {
               p.emote.started = true;
-              setAnim(anim, p.emote.clip, true);
+              setAnim(anim, p.emote.clip, { restart: true });
               setFace(anim, p.emote.face);
             }
           } else if (airborne) setAnim(anim, moving ? ANIMS.moveJump : ANIMS.jump);
           else if (p.move === 2) setAnim(anim, ANIMS.run);
           else if (p.move === 1) setAnim(anim, ANIMS.walk);
           else setAnim(anim, ANIMS.idle);
+
+          // Ngả người / nén người mượt dần, rung khi gồng
+          anim.model.rotation.x += (lean - anim.model.rotation.x) * smooth;
+          const scaleY = anim.model.scale.y + (anim.baseScale * squash - anim.model.scale.y) * smooth;
+          anim.model.scale.y = scaleY;
+          anim.model.position.x = act === 1 ? (Math.random() - 0.5) * 0.06 : 0;
+
+          // Nét mặt theo trạng thái (khi đang làm cử chỉ thì cử chỉ tự lo nét mặt)
+          const faceKey = p.emote ? 'emote' : face;
+          if (faceKey !== p.faceKey) {
+            p.faceKey = faceKey;
+            if (!p.emote) setFace(anim, face ? { [face]: 1 } : null);
+          }
           anim.mixer.update(dt);
         }
 
