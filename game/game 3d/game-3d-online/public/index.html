@@ -55,6 +55,17 @@
       pointer-events: none; display: none; white-space: nowrap;
     }
     #hint b { color: #ffe08a; }
+
+    /* Bảng cử chỉ hình tròn: tâm đặt đúng vị trí con trỏ chuột */
+    #wheel {
+      position: fixed; width: 320px; height: 320px; margin: -160px 0 0 -160px;
+      display: none; pointer-events: none; z-index: 5; user-select: none;
+    }
+    #wheel path { fill: rgba(16, 22, 34, 0.82); stroke: rgba(255, 255, 255, 0.25); stroke-width: 1.5; }
+    #wheel path.on { fill: rgba(79, 140, 255, 0.92); }
+    #wheel text { fill: #fff; text-anchor: middle; font-family: inherit; }
+    #wheel .icon { font-size: 26px; }
+    #wheel .name { font-size: 12px; font-weight: 600; }
   </style>
 
   <!-- Three.js tải từ CDN (cần có mạng internet) -->
@@ -82,7 +93,8 @@
     Đang online: <b id="count">0</b><br />
     Di chuyển: <b>W A S D</b> hoặc phím mũi tên<br />
     Chạy: giữ <b>Shift</b> &nbsp;·&nbsp; Nhảy: <b>Space</b><br />
-    Nói chuyện: <b>Enter</b> (chỉ người đứng gần mới thấy)
+    Nói chuyện: <b>Enter</b> (chỉ người đứng gần mới thấy)<br />
+    Cử chỉ: giữ <b>chuột trái</b>, kéo tới cử chỉ rồi thả
   </div>
 
   <div id="chat">
@@ -90,6 +102,7 @@
     <input id="chatInput" maxlength="100" placeholder="Nhập tin nhắn, Enter để gửi, Esc để hủy" autocomplete="off" />
   </div>
   <div id="hint"></div>
+  <svg id="wheel" viewBox="-160 -160 320 320"></svg>
 
   <script type="module">
     import * as THREE from 'three';
@@ -106,7 +119,25 @@
     const MODEL_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/RobotExpressive/RobotExpressive.glb';
     const MODEL_HEIGHT = 2.2;       // chiều cao nhân vật trong game
     const TINT_MATERIAL = 'Main';   // phần thân robot sẽ được tô màu riêng của từng người chơi
-    const ANIMS = { idle: 'Idle', walk: 'Walking', run: 'Running', jump: 'Jump' };
+    // Tên hoạt ảnh có trong mô hình cho từng kiểu di chuyển
+    const ANIMS = { idle: 'Idle', walk: 'Walking', run: 'Running', jump: 'Jump', moveJump: 'WalkJump' };
+    // Những hoạt ảnh chỉ diễn một lần rồi giữ dáng cuối (các hoạt ảnh khác lặp lại)
+    const PLAY_ONCE = ['Jump', 'WalkJump', 'Wave', 'Sitting', 'Death'];
+
+    // ---------- Cử chỉ ----------
+    // id: tên gửi lên server (phải có trong danh sách EMOTES của server)
+    // clip: hoạt ảnh của mô hình; seconds: diễn trong bao lâu
+    // face: nét mặt (mô hình có 3 kiểu: Angry, Surprised, Sad); say: chữ hiện trên đầu
+    const EMOTES = [
+      { id: 'dance', icon: '🕺', label: 'Nhảy', clip: 'Dance', seconds: 6.6, say: '🕺' },
+      { id: 'hello', icon: '👋', label: 'Xin chào', clip: 'Wave', seconds: 2.2, say: '👋 Xin chào!' },
+      { id: 'bye', icon: '🙋', label: 'Tạm biệt', clip: 'Wave', seconds: 2.2, say: '🙋 Tạm biệt!' },
+      { id: 'angry', icon: '😡', label: 'Tức giận', clip: 'Punch', seconds: 2.5, face: { Angry: 1 }, say: '😡' },
+      { id: 'sad', icon: '😢', label: 'Buồn', clip: 'No', seconds: 3.3, face: { Sad: 1 }, say: '😢' },
+      { id: 'bored', icon: '😩', label: 'Chán nản', clip: 'Sitting', seconds: 4, face: { Sad: 0.6 }, say: '😩' },
+      { id: 'laugh', icon: '😂', label: 'Cười lớn', clip: 'Yes', seconds: 3.3, face: { Surprised: 1 }, say: '😂 Ha ha ha!' },
+      { id: 'cry', icon: '😭', label: 'Khóc', clip: 'Death', seconds: 3.5, face: { Sad: 1 }, say: '😭' },
+    ];
 
     // Tải mô hình MỘT lần, mỗi người chơi dùng một bản sao.
     // Nếu tải lỗi (mất mạng...), game vẫn chạy với nhân vật khối hộp.
@@ -224,7 +255,9 @@
       }
       lines.push(line);
 
-      canvas.width = 512;
+      // Bong bóng rộng vừa đủ chứa chữ (câu ngắn thì bong bóng nhỏ)
+      const textWidth = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      canvas.width = Math.min(512, Math.ceil(textWidth) + 56);
       canvas.height = lines.length * 40 + 36;
       ctx.font = FONT; // đổi kích thước canvas làm mất cài đặt font nên phải đặt lại
       ctx.fillStyle = 'rgba(255,255,255,0.95)';
@@ -234,12 +267,12 @@
       ctx.fillStyle = '#1b2230';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      lines.forEach((l, i) => ctx.fillText(l, 256, 18 + 20 + i * 40, 480));
+      lines.forEach((l, i) => ctx.fillText(l, canvas.width / 2, 18 + 20 + i * 40, canvas.width - 32));
 
       const sprite = new THREE.Sprite(
         new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false })
       );
-      const width = 5;
+      const width = (5 * canvas.width) / 512;
       const height = (width * canvas.height) / canvas.width;
       sprite.scale.set(width, height, 1);
       sprite.position.y = 3.2 + height / 2;
@@ -247,11 +280,11 @@
       return sprite;
     }
 
-    function showBubble(p, text) {
+    function showBubble(p, text, ms = 5000) {
       clearBubble(p);
       p.bubble = makeBubble(text);
       p.mesh.add(p.bubble);
-      p.bubbleTimer = setTimeout(() => clearBubble(p), 5000); // tự biến mất sau 5 giây
+      p.bubbleTimer = setTimeout(() => clearBubble(p), ms); // tự biến mất sau một lúc
     }
 
     function clearBubble(p) {
@@ -304,9 +337,11 @@
         // SkeletonUtils.clone sao chép cả bộ xương, để mỗi nhân vật cử động riêng
         const model = SkeletonUtils.clone(m.scene);
         model.scale.setScalar(m.scale);
+        let face = null; // phần mặt, đổi được nét mặt
         model.traverse((o) => {
           if (!o.isMesh) return;
           o.castShadow = true;
+          if (o.morphTargetDictionary && 'Angry' in o.morphTargetDictionary) face = o;
           if (o.material.name === TINT_MATERIAL) {
             o.material = o.material.clone();
             o.material.color.set(info.color); // mỗi người một màu
@@ -317,29 +352,52 @@
 
         // Bộ phát hoạt ảnh riêng cho nhân vật này
         const mixer = new THREE.AnimationMixer(model);
-        const actions = {};
-        for (const key in ANIMS) {
-          const clip = THREE.AnimationClip.findByName(m.clips, ANIMS[key]);
-          if (clip) actions[key] = mixer.clipAction(clip);
+        const actions = {}; // tên hoạt ảnh -> hành động phát được
+        for (const clip of m.clips) {
+          const action = mixer.clipAction(clip);
+          if (PLAY_ONCE.includes(clip.name)) {
+            action.setLoop(THREE.LoopOnce);
+            action.clampWhenFinished = true;
+          }
+          actions[clip.name] = action;
         }
-        if (actions.jump) {
-          actions.jump.setLoop(THREE.LoopOnce); // nhảy chỉ diễn một lần rồi giữ dáng cuối
-          actions.jump.clampWhenFinished = true;
-        }
-        if (actions.idle) actions.idle.play();
-        group.userData.anim = { mixer, actions, current: 'idle' };
+        if (actions[ANIMS.idle]) actions[ANIMS.idle].play();
+        group.userData.anim = { mixer, actions, current: ANIMS.idle, face };
       });
 
       return group;
     }
 
-    // Chuyển mượt sang hoạt ảnh khác (đứng yên / đi / chạy / nhảy)
-    function setAnim(anim, name) {
-      if (anim.current === name || !anim.actions[name]) return;
+    // Chuyển mượt sang hoạt ảnh khác. restart = true: diễn lại từ đầu dù đang diễn đúng hoạt ảnh đó
+    function setAnim(anim, name, restart) {
+      if (!anim.actions[name] || (anim.current === name && !restart)) return;
       const prev = anim.actions[anim.current];
-      if (prev) prev.fadeOut(0.15);
+      if (prev && anim.current !== name) prev.fadeOut(0.15);
       anim.actions[name].reset().fadeIn(0.15).play();
       anim.current = name;
+    }
+
+    // Đổi nét mặt: { Angry: 1 } là giận hết mức; không truyền gì là mặt bình thường
+    function setFace(anim, face) {
+      if (!anim.face) return;
+      const dict = anim.face.morphTargetDictionary;
+      for (const key in dict) anim.face.morphTargetInfluences[dict[key]] = (face && face[key]) || 0;
+    }
+
+    // Bắt đầu một cử chỉ cho nhân vật p (do server báo về)
+    function startEmote(p, id) {
+      const emote = EMOTES.find((e) => e.id === id);
+      if (!emote) return;
+      p.emote = { ...emote, until: performance.now() + emote.seconds * 1000, started: false };
+      showBubble(p, emote.say, emote.seconds * 1000);
+    }
+
+    function stopEmote(p) {
+      if (!p.emote) return;
+      p.emote = null;
+      clearBubble(p);
+      const anim = p.mesh.userData.anim;
+      if (anim) setFace(anim, null);
     }
 
     // ============================================================
@@ -422,6 +480,9 @@
             showBubble(p, msg.text);
             addChatLine(p.name, msg.text);
           }
+        } else if (msg.type === 'emote') {
+          const p = players.get(msg.id);
+          if (p) startEmote(p, msg.name);
         } else if (msg.type === 'error') {
           errorEl.textContent = msg.message;
         }
@@ -536,6 +597,87 @@
     addEventListener('blur', stopAllKeys);
 
     // ============================================================
+    //  3b. BẢNG CỬ CHỈ HÌNH TRÒN
+    //  Giữ chuột trái: bảng hiện ra với tâm ở con trỏ. Kéo về một ngăn
+    //  rồi thả để làm cử chỉ đó. Thả ở giữa (chưa kéo đủ xa) thì hủy.
+    // ============================================================
+    const wheelEl = document.getElementById('wheel');
+    const WHEEL_INNER = 38;  // bán kính vùng giữa (vùng hủy)
+    const WHEEL_OUTER = 156; // bán kính ngoài
+    const SLICE = (Math.PI * 2) / EMOTES.length;
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const wheelSlices = [];
+    let wheelCenter = null; // { x, y } khi bảng đang mở
+    let wheelPick = -1;     // ngăn đang được chọn, -1 là chưa chọn
+
+    // Vẽ các ngăn. Ngăn số 0 nằm chính giữa phía trên, các ngăn sau xếp theo chiều kim đồng hồ.
+    EMOTES.forEach((emote, i) => {
+      const a0 = -Math.PI / 2 + (i - 0.5) * SLICE;
+      const a1 = a0 + SLICE;
+      const pt = (r, a) => `${(r * Math.cos(a)).toFixed(1)} ${(r * Math.sin(a)).toFixed(1)}`;
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d',
+        `M ${pt(WHEEL_INNER, a0)} L ${pt(WHEEL_OUTER, a0)} A ${WHEEL_OUTER} ${WHEEL_OUTER} 0 0 1 ${pt(WHEEL_OUTER, a1)} ` +
+        `L ${pt(WHEEL_INNER, a1)} A ${WHEEL_INNER} ${WHEEL_INNER} 0 0 0 ${pt(WHEEL_INNER, a0)} Z`);
+      wheelEl.appendChild(path);
+      wheelSlices.push(path);
+
+      const mid = (a0 + a1) / 2;
+      const cx = 104 * Math.cos(mid);
+      const cy = 104 * Math.sin(mid);
+      for (const [cls, content, dy] of [['icon', emote.icon, 2], ['name', emote.label, 22]]) {
+        const text = document.createElementNS(SVG_NS, 'text');
+        text.setAttribute('class', cls);
+        text.setAttribute('x', cx.toFixed(1));
+        text.setAttribute('y', (cy + dy).toFixed(1));
+        text.textContent = content;
+        wheelEl.appendChild(text);
+      }
+    });
+
+    function setWheelPick(index) {
+      if (index === wheelPick) return;
+      if (wheelPick >= 0) wheelSlices[wheelPick].classList.remove('on');
+      if (index >= 0) wheelSlices[index].classList.add('on');
+      wheelPick = index;
+    }
+
+    function closeWheel() {
+      wheelCenter = null;
+      setWheelPick(-1);
+      wheelEl.style.display = 'none';
+    }
+
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || myId === null) return;
+      e.preventDefault();
+      wheelCenter = { x: e.clientX, y: e.clientY };
+      wheelEl.style.left = e.clientX + 'px';
+      wheelEl.style.top = e.clientY + 'px';
+      wheelEl.style.display = 'block';
+    });
+
+    addEventListener('mousemove', (e) => {
+      if (!wheelCenter) return;
+      const dx = e.clientX - wheelCenter.x;
+      const dy = e.clientY - wheelCenter.y;
+      if (Math.hypot(dx, dy) < WHEEL_INNER) return setWheelPick(-1);
+      // Góc tính từ hướng "lên trên", tăng theo chiều kim đồng hồ
+      const angle = (Math.atan2(dy, dx) + Math.PI / 2 + SLICE / 2 + Math.PI * 2) % (Math.PI * 2);
+      setWheelPick(Math.floor(angle / SLICE) % EMOTES.length);
+    });
+
+    addEventListener('mouseup', (e) => {
+      if (e.button !== 0 || !wheelCenter) return;
+      const pick = wheelPick;
+      closeWheel();
+      if (pick >= 0 && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'emote', name: EMOTES[pick].id }));
+      }
+    });
+    addEventListener('blur', closeWheel);
+
+    // ============================================================
     //  4. VÒNG LẶP VẼ
     // ============================================================
     const clock = new THREE.Clock();
@@ -556,10 +698,21 @@
         // Chọn hoạt ảnh theo trạng thái server báo về (m: 0 đứng yên, 1 đi, 2 chạy)
         const anim = p.mesh.userData.anim;
         if (anim) {
-          if (p.targetY > 0.05) setAnim(anim, 'jump');
-          else if (p.move === 2) setAnim(anim, 'run');
-          else if (p.move === 1) setAnim(anim, 'walk');
-          else setAnim(anim, 'idle');
+          const airborne = p.targetY > 0.05;
+          const moving = p.move === 1 || p.move === 2;
+          // Di chuyển, nhảy hoặc hết giờ thì dừng cử chỉ
+          if (p.emote && (airborne || moving || performance.now() > p.emote.until)) stopEmote(p);
+
+          if (p.emote) {
+            if (!p.emote.started) {
+              p.emote.started = true;
+              setAnim(anim, p.emote.clip, true);
+              setFace(anim, p.emote.face);
+            }
+          } else if (airborne) setAnim(anim, moving ? ANIMS.moveJump : ANIMS.jump);
+          else if (p.move === 2) setAnim(anim, ANIMS.run);
+          else if (p.move === 1) setAnim(anim, ANIMS.walk);
+          else setAnim(anim, ANIMS.idle);
           anim.mixer.update(dt);
         }
 

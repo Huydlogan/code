@@ -17,7 +17,10 @@ const GRAVITY = 25;          // trọng lực kéo xuống
 const CHAT_RADIUS = 6;       // chỉ người đứng trong khoảng cách này mới nghe được
 const CHAT_MAX_LENGTH = 100; // số ký tự tối đa của một câu chat
 const CHAT_COOLDOWN_MS = 500; // mỗi người chỉ được gửi 1 câu / 0.5 giây
-const PLAYER_RADIUS = 0.6;   // bán kính va chạm của nhân vật
+const EMOTE_COOLDOWN_MS = 500; // mỗi người chỉ được làm 1 cử chỉ / 0.5 giây
+// Các cử chỉ được phép (phải khớp với danh sách EMOTES trong public/index.html)
+const EMOTES = ['dance', 'hello', 'bye', 'angry', 'sad', 'bored', 'laugh', 'cry'];
+const PLAYER_RADIUS = 0.6;  // bán kính va chạm của nhân vật
 const MAX_PLAYERS = 50;
 const MAX_MESSAGE_LENGTH = 1024; // tin nhắn dài hơn mức này bị bỏ qua
 
@@ -142,6 +145,7 @@ export class GameRoom extends DurableObject {
           run: false,    // đang giữ Shift
           jump: false,   // đang giữ Space
           lastChat: 0,
+          lastEmote: 0,
           ws,
         };
         this.players.set(id, player);
@@ -169,6 +173,17 @@ export class GameRoom extends DurableObject {
         player.dz = Number.isFinite(dz) ? clamp(dz, -1, 1) : 0;
         player.run = msg.run === true;
         player.jump = msg.jump === true;
+        return;
+      }
+
+      // --- Người chơi làm một cử chỉ (vẫy tay, nhảy múa...) ---
+      // Server chỉ kiểm tra tên hợp lệ rồi báo cho mọi người; client lo phần diễn hoạt ảnh.
+      if (msg.type === 'emote' && player) {
+        const now = Date.now();
+        if (now - player.lastEmote < EMOTE_COOLDOWN_MS) return; // chống spam
+        if (!EMOTES.includes(msg.name)) return;
+        player.lastEmote = now;
+        this.broadcast({ type: 'emote', id: player.id, name: msg.name });
         return;
       }
 
